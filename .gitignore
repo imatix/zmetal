@@ -1,0 +1,5 @@
+src/client
+src/server
+core
+*.o
+
