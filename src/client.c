@@ -24,9 +24,9 @@
     =====================================================================
 */
 
-#include "zapi.h"
+#include "zmetal.c"
 
-#define REQUEST_TIMEOUT     500    //  msecs
+#define REQUEST_TIMEOUT     1000    //  msecs
 
 int main (int argc, char *argv [])
 {
@@ -43,19 +43,11 @@ int main (int argc, char *argv [])
     void *control = zctx_socket_new (ctx, ZMQ_REQ);
     zmq_connect (control, endpoint);
 
-    zmsg_t *request = zmsg_new ();
-    zmsg_addstr (request, "Connection.Open");
-    zmsg_addstr (request,
-        "{\"protocol\":{\"name\":\"MTL\",\"version\":\"0.1\"}}");
-    zmsg_send (&request, control);
-
-    zmq_pollitem_t items [] = { { control, 0, ZMQ_POLLIN, 0 } };
-    int rc = zmq_poll (items, 1, REQUEST_TIMEOUT * 1000);
-    if (items [0].revents & ZMQ_POLLIN) {
-        zmsg_t *reply = zmsg_recv (control);
-        zmsg_dump (reply);
-        zmsg_destroy (&reply);
-    }
+    send_connection_open (control, "MTL", 1, "home");
+    mtl_response_t *response
+        = mtl_response_recv (control, REQUEST_TIMEOUT);
+    if (response)
+        mtl_response_destroy (&response);
     else
         printf ("E: no server present, try again later\n");
 

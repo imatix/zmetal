@@ -24,7 +24,7 @@
     =====================================================================
 */
 
-#include "zapi.h"
+#include "zmetal.c"
 
 int main (int argc, char *argv [])
 {
@@ -43,40 +43,13 @@ int main (int argc, char *argv [])
     assert (rc == 0);
 
     while (TRUE) {
-        zmsg_t *request = zmsg_recv (client);
-        zmsg_dump (request);
+        mtl_request_t *request = mtl_request_recv (client, -1);
         if (!request)
             break;              //  Interrupted
-
-        //  Reject badly framed messages
-        if (zmsg_size (request) != 4) {
-            zmsg_destroy (&request);
-            continue;
+        if (streq (request->command, "connection.open")) {
+            send_response_201 (client, request, "test");
         }
-        //  Save address stack
-        zframe_t *address = zmsg_pop (request);
-        zframe_t *empty = zmsg_pop (request);
-
-        char *command = zmsg_popstr (request);
-        uint size = strlen (command);
-        while (size) {
-            size--;
-            command [size] = tolower (command [size]);
-        }
-        if (streq (command, "connection.open")) {
-            zmsg_t *reply = zmsg_new ();
-            zmsg_add (reply, address);
-            zmsg_add (reply, empty);
-            zmsg_addstr (reply, "201");
-            zmsg_addstr (reply,
-                "{\"status\":\"Ready\",\"profiles\":[\"test\"]}");
-            zmsg_send (&reply, client);
-        }
-        else {
-            zframe_destroy (&address);
-            zframe_destroy (&empty);
-        }
-        zmsg_destroy (&request);
+        mtl_request_destroy (&request);
     }
     zctx_destroy (&ctx);
     return 0;

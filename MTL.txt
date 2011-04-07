@@ -37,8 +37,6 @@ The main goals of MTL are:
 * To provide detection of errors such as dead or blocked peers.
 * To provide robust error handling.
 
-MTL is built on 0MQ and assumes that 0MQ, or a 0MQ-compatible stack, is available to all implementations.
-
 ++ General Operation
 
 MTL separates all client-server activity into two distinct flows:
@@ -79,7 +77,7 @@ Connection.Open
 {
     "protocol": {
         "name": "MTL",
-        "version": "0.1"
+        "version": 1
     },
     "virtual-host": "test-env"
 }
@@ -92,7 +90,7 @@ Clients are authenticated using the SASL challenge-response model. A server MAY 
 ------------------------------------------------------------
 {
     "status": "Ready",
-    "profiles": [ list of profiles ]
+    "profiles": [ "profile name", "profile name",... ]
 }
 [[/code]]
 
@@ -103,7 +101,7 @@ To challenge a client, the server responds with 401 Unauthorized and specifies a
 ------------------------------------------------------------
 {
     "status": "Unauthorized",
-    "mechanisms": [ "plain" ]
+    "mechanisms": [ "mechanism name", "mechanism name",... ]
 }
 [[/code]]
 
@@ -115,19 +113,19 @@ To authenticate, a client sends Connection.Authorize:
 Connection.Authorize
 ------------------------------------------------------------
 {
-    "mechanism" : "plain",
+    "mechanism" : "mechanism name",
     "response" : "BASE64-encoded blob"
 }
 [[/code]]
 
-If the SASL challenge/response cycle finished, the server replies with 201 Ready. Otherwise the server responds with 301 Challenged, after which the client MUST re-send a new Connection.Authorize with new response data:
+If the SASL challenge/response cycle finished, the server replies with 201 Ready. Otherwise the server responds with 402 Challenged, after which the client MUST re-send a new Connection.Authorize with new response data:
 
 [[code]]
 402
 ------------------------------------------------------------
 {
     "status": "Challenged",
-    "mechanism": "plain",
+    "mechanism": "mechanism name",
     "challenge" : "BASE64-encoded blob"
 }
 [[/code]]
@@ -164,24 +162,31 @@ Each profile defines a set of classes that the client can use to work with serve
 
 +++ Requesting a Data Lease
 
-To open a data flow, the client issues a Connection.Data command, specifying either or both a writer and a reader:
+A data flow can either read from a set of resources, or write to a set of resources. To open a data flow, the client requests a "lease", using either the Connection.Reader or Connection.Writer command:
 
 [[code]]
-Connection.Data
+Connection.Reader
 ------------------------------------------------------------
 {
-    "writer": {
-        "resources": [ list of resource names ],
-        "handshake": "none | full"
-    },
-    "reader": {
-        "resources": [ list of resource names ],
-        "handshake": "none | full"
-    }
+    "resources": [ "resource name", "resource name", ...],
+    "confirm": "none | full"
 }
 [[/code]]
 
-A Connection.Data command must specify at least one resource name. The handshake field specifies whether messages are acknowledged or not. If the server accepts the Connection.Data request it responds with a 202 Data Lease:
+[[code]]
+Connection.Writer
+------------------------------------------------------------
+{
+    "resources": [ "resource name", "resource name", ...],
+    "confirm": "none | full"
+}
+[[/code]]
+
+The client MUST have already selected a profile before making a Connection.Reader or Connection.Writer request.
+
+The resources list specifies which resources the request applies to. An empty list means "any and all resources on the server".
+
+The "confirm" field specifies whether messages are confirmed or not. If the server accepts the Connection.Reader or Connection.Writer request it responds with a 202 Data Lease:
 
 [[code]]
 202
@@ -193,7 +198,7 @@ A Connection.Data command must specify at least one resource name. The handshake
 }
 [[/code]]
 
-If the profile does not support the requested handshake model, the server MUST respond with a 501 Not Implemented:
+If the profile does not support the requested confirmation model, the server MUST respond with a 501 Not Implemented:
 
 [[code]]
 501
@@ -223,23 +228,23 @@ Every data command follows this format:
 The header frame is encoded thus:
 
 * 1-byte command type
-* 1-byte command sequence
 * Optional fields
 
-Depending on the command type, the sequence number is followed by zero or more optional fields, whose encoding and meaning are specified per command type.
+Depending on the command type, the command type is followed by zero or more optional fields, whose encoding and meaning are specified per command type.
 
 +++ Initializing a Data Flow
 
 When a client has opened a data connection it must send a Lease command as follows:
 
 * Type = 0x01, Lease
- * Field 1: data lease provided by server 202 response (short string)
+ * Field 1: command sequence (integer)
+ * Field 2: data lease provided by server 202 response (short string)
 * Body: unused
 
-The server MUST reply with a Response command as follows:
+The server MUST reply with a Response command that echoes the command sequence used by the client, as follows:
 
 * Type = 0x02, Response
- * Field 1: 1-byte in-reply-to command sequence
+ * Field 1: command sequence (integer)
 * Body: three-digit response code
 
 Where the response code can be:
@@ -247,20 +252,23 @@ Where the response code can be:
 * "200" - the lease was successful
 * "403" - the lease was forbidden
 
+The purpose of the command sequence in this and other commands is to allow the client to pipeline commands, i.e. to send multiple commands without waiting for the response to each. The server MAY return Response commands in any order.
+
 +++ Summoning a Resource
 
 To start receiving content from a resource, the client sends a Summon command as follows:
 
 * Type = 0x03, Summon
- * Field 1: resource name (short string)
+ * Field 1: command sequence (integer)
+ * Field 2: resource name (short string)
 * Body: unused
 
-Where the resource name MUST be one of the resources specified in the Connection.Data "reader" specification.
+Where the resource name MUST be one of the resources specified by the Connection.Reader request for this data lease. The client MAY NOT summon the same resource twice without an intervening dismiss.
 
 The server MUST reply with a Response command, where the response code can be:
 
 * "200" - the Summon command was successful
-* "400" - the resource is not valid for this data lease
+* "400" - the resource cannot be summoned.
 
 Following a successful Summon command, the server-side resource MAY send Content commands to the client.
 
@@ -269,15 +277,16 @@ Following a successful Summon command, the server-side resource MAY send Content
 To stop receiving content from a resource, the client sends a Dismiss command as follows:
 
 * Type = 0x04, Dismiss
- * Field 1: resource name (short string)
+ * Field 1: command sequence (integer)
+ * Field 2: resource name (short string)
 * Body: unused
 
-Where the resource name MUST be one of the resources specified in the Connection.Data "reader" specification.
+Where the resource name MUST be one of the resources specified by the Connection.Reader request for this data lease. The client MAY NOT dismiss the same resource twice without an intervening summon.
 
 The server MUST reply with a Response command, where the response code can be:
 
 * "200" - the Consume command was successful
-* "400" - the resource is not valid for this data lease
+* "400" - the resource cannot be dismissed.
 
 Following a successful Dismiss command, the server-side resource MUST NOT send further Contents to the client.
 
@@ -286,33 +295,33 @@ Following a successful Dismiss command, the server-side resource MUST NOT send f
 To send content to a resource, the client sends a Content command as follows:
 
 * Type = 0x05, Content
- * Field 1: resource name (short string), may be empty
- * Field 2: properties (field table)
- * Field 3: content sequence (integer)
+ * Field 1: content sequence (integer)
+ * Field 2: resource name (short string), may be empty
+ * Field 3: properties (field table)
 * Body: opaque binary content
 
-The Connection.Data command MUST have specified a writer. The resource name is required if the Connection.Data writer specified more than one resource.
+If the Connection.Writer request specified more than one resource, then the resource name is required.
 
 +++ Receiving Content from a Resource
 
 When a resource has content to send to a client, the server sends a Content command as follows:
 
 * Type = 0x05, Content
- * Field 1: resource name (short string), may be empty
- * Field 2: properties (field table)
- * Field 3: content sequence (integer)
+ * Field 1: content sequence (integer)
+ * Field 2: resource name (short string), may be empty
+ * Field 3: properties (field table)
 * Body: opaque binary content
 
-The server MUST send the Response to a Summon command before any Content from that resource, and the server MUST NOT send any Content from a resource after a successful Response to a Dismiss command.
+The server MUST send the Response to a Summon command before any Content from that resource, and the server MUST NOT send any Content from a resource after a successful Response to a Dismiss command. If the Connection.Reader request specified more than one resource, then the resource name is required.
 
-+++ Content Handshaking
++++ Content Confirmation
 
-All Content commands in one direction on a data flow are either confirmed, or not confirmed, depending on the "handshake" value specified in the corresponding Connection.Data reader or write:
+All Content commands in one direction on a data flow are either confirmed, or not confirmed, depending on the "confirm" value specified in the corresponding Connection.Reader or Connection.Writer:
 
 * "none" - Content commands are not confirmed.
-* "full" - Content commands are confirmed by handshaking.
+* "full" - Content commands are confirmed.
 
-The handshaking works as follows:
+The confirmation works as follows:
 
 * One peer sends one or more Content commands.
 * The recipient confirms safe receipt of one or more Content commands with a Confirm command.
@@ -325,7 +334,7 @@ The Confirm command has this format:
  * Field 2: multiple (Boolean)
 * Body: unused
 
-If the 'multiple' field is TRUE, the Confirm command covers all Contents up to and including the specified content sequence. If the content sequence is zero, it covers all outstanding Contents. If the 'multiple' field is FALSE, the Confirm covers exactly one Content.
+If the 'multiple' field is TRUE, the Confirm command covers all Contents up to and including the specified content sequence. If the 'multiple' field is FALSE, the Confirm covers exactly one Content.
 
 There is no response to a Confirm command. Invalid Confirm commands are ignored silently.
 
@@ -337,17 +346,11 @@ The Reject command has this format:
  * Field 3: recycle (Boolean)
 * Body: unused
 
-If the 'multiple' field is TRUE, the Reject command covers all Contents up to and including the specified content sequence. If the content sequence is zero, it covers all outstanding Contents. If the 'multiple' field is FALSE, the Reject covers exactly one Content.
+If the 'multiple' field is TRUE, the Reject command covers all Contents up to and including the specified content sequence. If the 'multiple' field is FALSE, the Reject covers exactly one Content.
 
 if the 'recycle' field is TRUE, the Content will be resent using a heuristic that depends on the profile.
 
-+++ Command Sequence Numbering
-
-The command sequence number is set by the client on commands. The server will echo this number in responses. The purpose of this sequence number is to allow the client to pipeline commands, i.e. to send multiple commands without waiting for the response to each.
-
-If the client does pipeline commands then it MUST send a unique (e.g. incrementing) sequence number for each command in a pipeline and it MUST NOT send more than 256 commands without waiting for a response.
-
-The server MAY return Response commands in any order.
+There is no response to a Reject command. Invalid Reject commands are ignored silently.
 
 +++ Heartbeating
 
@@ -371,6 +374,7 @@ These are the possible field encodings:
 
 * Short string: a single byte followed by 0 to 255 bytes of printable characters.
 * Integer: an eight-byte (64-bit) unsigned value represented in network byte order.
+* Shortint: a two-byte (16-bit) unsigned value represented in network byte order.
 * Boolean: a single byte with the possible values 0 (FALSE) or 1 (TRUE).
 * Field table: to be defined.
 
